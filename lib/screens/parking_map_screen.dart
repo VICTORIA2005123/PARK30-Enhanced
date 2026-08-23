@@ -1,312 +1,659 @@
+import 'dart:ui' as ui;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import '../models/parking_spot_model.dart';
+import '../repositories/parking_repository.dart';
+import '../services/notification_service.dart';
 import '../services/auth_service.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../utils/constants.dart';
+import 'payment_screen.dart';
+import '../services/rate_engine_service.dart';
 
 class ParkingMapScreen extends StatelessWidget {
-  final String parkingType; // 'car' or 'motorcycle'
+  final String parkingType;
 
   const ParkingMapScreen({super.key, required this.parkingType});
 
-  String get backgroundImage {
-    return parkingType == 'car'
-        ? 'assets/car_parking_map.png'
-        : 'assets/motorcycle_parking_map.png';
-  }
-
-  String get title {
-    return parkingType == 'car' ? 'Car Parking' : 'Motorcycle Parking';
-  }
+  String get backgroundImage => parkingType == 'car'
+      ? 'assets/car_parking_map.png'
+      : 'assets/motorcycle_parking_map.png';
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFF0A0E21), // Deep dark background
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        backgroundColor: Colors.transparent,
         elevation: 0,
-        title: Text(
-          title,
-          style: const TextStyle(
-            color: Color(0xFF1565C0),
-            fontWeight: FontWeight.bold,
+        leading: Padding(
+          padding: const EdgeInsets.all(8.0),
+          child: CircleAvatar(
+            backgroundColor: Colors.black54,
+            child: const BackButton(color: Colors.white),
           ),
         ),
-        iconTheme: const IconThemeData(color: Color(0xFF1565C0)),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8.0),
+            child: CircleAvatar(
+              backgroundColor: Colors.cyanAccent.withOpacity(0.8),
+              child: IconButton(
+                icon: const Icon(Icons.directions, color: Colors.black),
+                onPressed: () => _launchMaps(context),
+                tooltip: "Get Directions",
+              ),
+            ),
+          ),
+        ],
       ),
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Colors.white, Color(0xFFE3F2FD)],
-          ),
-        ),
-        child: InteractiveViewer(
-          // Allows zoom and pan
-          minScale: 0.8,
-          maxScale: 4.0,
-          child: StreamBuilder<QuerySnapshot>(
-            stream: FirebaseFirestore.instance
-                .collection('parkingSpots')
-                .where('type', isEqualTo: parkingType)
-                .snapshots(),
-            builder: (context, snapshot) {
-              if (!snapshot.hasData) {
-                return const Center(
-                  child: CircularProgressIndicator(
-                    valueColor: AlwaysStoppedAnimation<Color>(
-                      Color(0xFF1976D2),
-                    ),
-                  ),
-                );
-              }
-              if (snapshot.hasError) {
-                return const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.error_outline,
-                        color: Color(0xFF1976D2),
-                        size: 48,
+      body: Column(
+        children: [
+          // 1. Stats Header (Fixed at top)
+          Container(
+            padding: const EdgeInsets.only(top: 100, bottom: 20, left: 20, right: 20),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [const Color(0xFF0A0E21), const Color(0xFF0A0E21).withOpacity(0.0)],
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      parkingType == 'car' ? "CAR ZONE" : "BIKE ZONE",
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1.2
                       ),
-                      SizedBox(height: 16),
-                      Text(
-                        'Something went wrong',
-                        style: TextStyle(
-                          color: Color(0xFF1976D2),
-                          fontSize: 16,
-                          fontWeight: FontWeight.w500,
+                    ),
+                    const SizedBox(height: 5),
+                    const Text(
+                      "Live status of all spots",
+                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
+                  ],
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.white.withOpacity(0.2)),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(width: 8, height: 8, decoration: const BoxDecoration(color: Colors.greenAccent, shape: BoxShape.circle)),
+                      const SizedBox(width: 8),
+                      // We'll update this count dynamically if needed, or just show label
+                      const Text("Available", style: TextStyle(color: Colors.white, fontSize: 12)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // 2. Scrollable Grid
+          Expanded(
+            child: StreamBuilder<QuerySnapshot>(
+              stream: ParkingRepository().getSpotsByType(parkingType),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+
+                final spots = snapshot.data!.docs
+                    .map((doc) => ParkingSpot.fromFirestore(doc))
+                    .toList();
+                
+                // Sort by Number (P1, P2, ... P70)
+                spots.sort((a, b) {
+                  // ID Format: 'car-P10' or 'bike-P5'
+                  // We split by 'P' and try to parse the last part
+                  try {
+                    int numA = int.parse(a.id.split('P').last);
+                    int numB = int.parse(b.id.split('P').last);
+                    return numA.compareTo(numB);
+                  } catch (e) {
+                    return a.id.compareTo(b.id); // Fallback
+                  }
+                });
+
+                return GridView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 3,
+                    childAspectRatio: 1.0,
+                    crossAxisSpacing: 15,
+                    mainAxisSpacing: 15,
+                  ),
+                  itemCount: spots.length,
+                  itemBuilder: (context, index) {
+                    final spot = spots[index];
+                    return _buildGridSpotCard(context, spot);
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _findAndOpenNearest(context),
+        backgroundColor: Colors.cyanAccent,
+        foregroundColor: Colors.black,
+        icon: const Icon(Icons.near_me_rounded),
+        label: const Text("Find Nearest"),
+      ),
+    );
+  }
+
+  Future<void> _launchMaps(BuildContext context) async {
+    try {
+      const double lat = AppConstants.parkingLatitude;
+      const double lng = AppConstants.parkingLongitude;
+      
+      final Uri googleMapsUrl = Uri.parse("google.navigation:q=$lat,$lng&mode=d");
+      final Uri webUrl = Uri.parse("https://www.google.com/maps/dir/?api=1&destination=$lat,$lng");
+
+      if (await canLaunchUrl(googleMapsUrl)) {
+        await launchUrl(googleMapsUrl);
+      } else if (await canLaunchUrl(webUrl)) {
+         await launchUrl(webUrl, mode: LaunchMode.externalApplication);
+      } else {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Could not launch maps")),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint("Map Launch Error: $e");
+    }
+  }
+
+  Future<void> _findAndOpenNearest(BuildContext context) async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("Locating nearest free spot..."), duration: Duration(milliseconds: 800)),
+    );
+
+    try {
+      // FIX: Query all available spots and sort client-side to avoid missing Index error
+      final query = await FirebaseFirestore.instance
+          .collection('parking_spots')
+          .where('type', isEqualTo: parkingType)
+          .where('status', isEqualTo: 'available')
+          .get();
+
+      if (query.docs.isNotEmpty) {
+        final spots = query.docs.map((doc) => ParkingSpot.fromFirestore(doc)).toList();
+        
+        // Sort by Number (P1, P2 ... P70)
+        spots.sort((a, b) {
+           try {
+             int numA = int.parse(a.id.split('P').last);
+             int numB = int.parse(b.id.split('P').last);
+             return numA.compareTo(numB);
+           } catch (e) {
+             return a.id.compareTo(b.id);
+           }
+        });
+
+        final bestSpot = spots.first;
+        
+        if (context.mounted) {
+          _showSpotDetailsSheet(context, bestSpot, isMySpot: false);
+        }
+      } else {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("No available spots found right now.")),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint("Error finding nearest: $e");
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error locating spot: $e")),
+        );
+      }
+    }
+  }
+
+  void _handleSpotTap(BuildContext context, ParkingSpot spot) async {
+    final user = AuthService().currentUser;
+    if (user == null) return;
+
+    final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+    final List currentBookings = userDoc.data()?['currentBookings'] ?? [];
+
+    if (spot.bookedBy == user.uid) {
+      // Show "My Spot" details
+       _showSpotDetailsSheet(context, spot, isMySpot: true);
+    } else if (spot.status == 'available' && currentBookings.length < 3) {
+      // Show Booking details
+       _showSpotDetailsSheet(context, spot, isMySpot: false);
+    } else if (spot.status != 'available') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Spot is currently occupied')),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Max 3 spots allowed')),
+      );
+    }
+  }
+  void _showSpotDetailsSheet(BuildContext context, ParkingSpot spot, {required bool isMySpot}) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) {
+        return _SpotSheetContent(spot: spot, isMySpot: isMySpot);
+      },
+    );
+  }
+
+  Widget _buildGridSpotCard(BuildContext context, ParkingSpot spot) {
+    final user = AuthService().currentUser;
+    final bool isMine = spot.bookedBy == user?.uid;
+    final bool isAvailable = spot.status == 'available';
+
+    Color baseColor;
+    IconData icon;
+
+    if (isMine) {
+      baseColor = Colors.amber;
+      icon = Icons.star_rounded;
+    } else if (isAvailable) {
+      baseColor = Colors.greenAccent;
+      icon = Icons.local_parking;
+    } else {
+      baseColor = Colors.redAccent;
+      icon = parkingType == 'car' ? Icons.directions_car : Icons.two_wheeler;
+    }
+
+    return GestureDetector(
+      onTap: () {
+        // Reuse the logic (BottomSheet)
+        if (isMine) {
+           _showSpotDetailsSheet(context, spot, isMySpot: true);
+        } else if (isAvailable) {
+           _showSpotDetailsSheet(context, spot, isMySpot: false);
+        } else {
+           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Spot occupied")));
+        }
+      },
+      child: Container(
+        decoration: BoxDecoration(
+          color: baseColor.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: baseColor.withOpacity(isMine || isAvailable ? 0.5 : 0.2), 
+            width: isMine ? 2 : 1
+          ),
+          boxShadow: [
+            if (isMine || isAvailable)
+              BoxShadow(
+                color: baseColor.withOpacity(0.2),
+                blurRadius: 10,
+                offset: const Offset(0, 4)
+              )
+          ]
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: baseColor.withOpacity(0.9), size: 32),
+            const SizedBox(height: 8),
+            Text(
+              spot.id.split('-').last,
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.9),
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SpotSheetContent extends StatefulWidget {
+  final ParkingSpot spot;
+  final bool isMySpot;
+
+  const _SpotSheetContent({required this.spot, required this.isMySpot});
+
+  @override
+  State<_SpotSheetContent> createState() => _SpotSheetContentState();
+}
+
+class _SpotSheetContentState extends State<_SpotSheetContent> {
+  double _selectedHours = 1.0;
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<RateDetails>(
+      future: RateEngineService().calculateDynamicRate(
+        vehicleType: widget.spot.type,
+        durationHours: _selectedHours,
+      ),
+      builder: (context, snapshot) {
+        final rateDetails = snapshot.data;
+        final double totalPrice = rateDetails?.totalCost ?? (_selectedHours * 40);
+        final double hourlyRate = rateDetails?.finalHourlyRate ?? 40;
+
+        return ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: Container(
+              padding: const EdgeInsets.all(25),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1A2E).withOpacity(0.95),
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+                border: Border(top: BorderSide(color: Colors.white.withOpacity(0.1))),
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 40, height: 4,
+                        decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              "Spot ${widget.spot.id.split('-').last}",
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 28,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            const SizedBox(height: 5),
+                            Row(
+                              children: [
+                                Container(
+                                  width: 8, height: 8,
+                                  decoration: BoxDecoration(
+                                    color: widget.isMySpot ? Colors.amber : (widget.spot.status == 'available' ? Colors.greenAccent : Colors.redAccent),
+                                    shape: BoxShape.circle,
+                                    boxShadow: [BoxShadow(color: (widget.isMySpot ? Colors.amber : (widget.spot.status == 'available' ? Colors.greenAccent : Colors.redAccent)).withOpacity(0.5), blurRadius: 5)],
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  widget.isMySpot ? "YOUR BOOKING" : (widget.spot.status == 'available' ? "AVAILABLE NOW" : "OCCUPIED"),
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(0.6),
+                                    fontSize: 12,
+                                    letterSpacing: 1.5,
+                                    fontWeight: FontWeight.bold
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.05),
+                            borderRadius: BorderRadius.circular(15),
+                          ),
+                          child: Icon(
+                            widget.spot.type == 'car' ? Icons.directions_car_filled : Icons.two_wheeler,
+                            color: Colors.white,
+                            size: 30,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 15),
+
+                    // Dynamic Surge Badge
+                    if (rateDetails != null) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: rateDetails.timeMultiplier > 1.0 
+                              ? Colors.orangeAccent.withOpacity(0.15) 
+                              : (rateDetails.timeMultiplier < 1.0 ? Colors.greenAccent.withOpacity(0.15) : Colors.cyanAccent.withOpacity(0.15)),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: rateDetails.timeMultiplier > 1.0 
+                                ? Colors.orangeAccent.withOpacity(0.4) 
+                                : (rateDetails.timeMultiplier < 1.0 ? Colors.greenAccent.withOpacity(0.4) : Colors.cyanAccent.withOpacity(0.4)),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              rateDetails.timeMultiplier > 1.0 ? Icons.bolt : (rateDetails.timeMultiplier < 1.0 ? Icons.local_offer : Icons.tune),
+                              size: 14,
+                              color: rateDetails.timeMultiplier > 1.0 ? Colors.orangeAccent : (rateDetails.timeMultiplier < 1.0 ? Colors.greenAccent : Colors.cyanAccent),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              rateDetails.demandPeriodLabel,
+                              style: TextStyle(
+                                color: rateDetails.timeMultiplier > 1.0 ? Colors.orangeAccent : (rateDetails.timeMultiplier < 1.0 ? Colors.greenAccent : Colors.cyanAccent),
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 15),
+                    ],
+                    
+                    if (!widget.isMySpot) ...[
+                      // Duration Slider
+                      Text("Select Duration", style: TextStyle(color: Colors.white.withOpacity(0.5))),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Slider(
+                              value: _selectedHours,
+                              min: 1,
+                              max: 12,
+                              divisions: 11,
+                              activeColor: Colors.cyanAccent,
+                              inactiveColor: Colors.white10,
+                              label: "${_selectedHours.round()} hrs",
+                              onChanged: (val) => setState(() => _selectedHours = val),
+                            ),
+                          ),
+                          Text(
+                            "${_selectedHours.round()} hrs",
+                            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                    ],
+
+                    // Info Grid
+                    Row(
+                      children: [
+                        _infoTile("Total Cost", "₹${totalPrice.toInt()}"),
+                        _infoTile("Dynamic Rate", "₹${hourlyRate.toInt()}/hr"),
+                        _infoTile("Vehicle", rateDetails?.vehicleType ?? widget.spot.type.toUpperCase()),
+                      ],
+                    ),
+
+                    // AI Pricing Insights Card
+                    if (rateDetails != null) ...[
+                      const SizedBox(height: 15),
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.04),
+                          borderRadius: BorderRadius.circular(15),
+                          border: Border.all(color: Colors.cyanAccent.withOpacity(0.2)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Row(
+                              children: [
+                                Icon(Icons.auto_awesome, color: Colors.cyanAccent, size: 16),
+                                SizedBox(width: 6),
+                                Text(
+                                  "GENAI PRICING RATIONALE",
+                                  style: TextStyle(color: Colors.cyanAccent, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.0),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              rateDetails.surgeReason,
+                              style: const TextStyle(color: Colors.white70, fontSize: 12),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              rateDetails.aiTip,
+                              style: const TextStyle(color: Colors.amberAccent, fontSize: 12, fontWeight: FontWeight.bold),
+                            ),
+                          ],
                         ),
                       ),
                     ],
-                  ),
-                );
-              }
-
-              // Map Firestore documents to ParkingSpot objects
-              final spots = snapshot.data!.docs
-                  .map((doc) => ParkingSpot.fromFirestore(doc))
-                  .toList();
-
-              return Stack(
-                children: [
-                  // Background parking map image
-                  Image.asset(backgroundImage),
-
-                  // Overlay each parking spot
-                  ...spots.map((spot) {
-                    return Positioned(
-                      left: spot.x,
-                      top: spot.y,
-                      child: GestureDetector(
-                        onTap: () => _handleSpotTap(context, spot),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 300),
-                          width: parkingType == 'car' ? 40 : 55,
-                          height: parkingType == 'car' ? 40 : 35,
-                          decoration: BoxDecoration(
-                            color: spot.status == 'available'
-                                ? const Color(0xFF4CAF50).withOpacity(0.9)
-                                : const Color(0xFFE53935).withOpacity(0.9),
-                            border: Border.all(color: Colors.white, width: 2.0),
-                            borderRadius: BorderRadius.circular(8),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.2),
-                                blurRadius: 4,
-                                offset: const Offset(0, 2),
-                              ),
-                            ],
-                          ),
-                          child: Stack(
-                            children: [
-                              if (spot.status == 'available')
-                                const Center(
-                                  child: Icon(
-                                    Icons.local_parking,
-                                    color: Colors.white,
-                                    size: 16,
-                                  ),
-                                ),
-                              if (spot.status == 'booked')
-                                const Center(
-                                  child: Icon(
-                                    Icons.lock,
-                                    color: Colors.white,
-                                    size: 16,
-                                  ),
-                                ),
-                              Positioned(
-                                bottom: 2,
-                                right: 2,
-                                child: Text(
-                                  spot.id.split('-').last,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ],
+                    
+                    const SizedBox(height: 25),
+                    
+                    // Action Button
+                    SizedBox(
+                      width: double.infinity,
+                      height: 55,
+                      child: ElevatedButton(
+                        onPressed: () {
+                           Navigator.pop(context); // Close sheet
+                           if (widget.isMySpot) {
+                             _releaseSpot(widget.spot.id);
+                           } else {
+                             _bookSpot(widget.spot.id, _selectedHours, totalPrice);
+                           }
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: widget.isMySpot ? Colors.redAccent : Colors.cyanAccent,
+                          foregroundColor: widget.isMySpot ? Colors.white : Colors.black,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                          elevation: 0,
+                        ),
+                        child: Text(
+                          widget.isMySpot ? "RELEASE SPOT" : "BOOK NOW • ₹${totalPrice.toInt()}",
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 16,
+                            letterSpacing: 1.0,
                           ),
                         ),
                       ),
-                    );
-                  }).toList(),
-                ],
-              );
-            },
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                ),
+              ),
+            ),
           ),
+        );
+      },
+    );
+  }
+
+  Widget _infoTile(String title, String value) {
+    return Expanded(
+      child: Container(
+        margin: const EdgeInsets.only(right: 10),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.03),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 10)),
+            const SizedBox(height: 4),
+            Text(value, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
+          ],
         ),
       ),
     );
   }
 
-  // Handle tap on a parking spot
-  void _handleSpotTap(BuildContext context, ParkingSpot spot) async {
+  Future<void> _bookSpot(String spotId, double duration, double calculatedPrice) async {
     final user = AuthService().currentUser;
-    if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please log in to interact with spots.')),
-      );
-      return;
-    }
 
-    // Get the latest user data to check their current bookings
-    final userDoc = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .get();
-    final userData = userDoc.data() as Map<String, dynamic>;
-    final List<dynamic> currentBookings = userData['currentBookings'] ?? [];
+    // 1. Navigate to Payment Screen with Dynamic Price
+    final bool? paymentSuccess = await Navigator.push(
+      context, 
+      MaterialPageRoute(builder: (context) => PaymentScreen(
+        amount: calculatedPrice, 
+        spotName: "Spot ${spotId.split('-').last}"
+      ))
+    );
 
-    // SCENARIO 1: Spot is booked by the CURRENT user (Allow Cancellation)
-    if (spot.bookedBy == user.uid) {
-      _showCancelDialog(context, spot, user.uid);
-    }
-    // SCENARIO 2: Spot is available AND user has NOT reached the limit
-    else if (spot.status == 'available' && currentBookings.length < 3) {
-      _showBookDialog(context, spot, user.uid);
-    }
-    // SCENARIO 3: User has reached the limit
-    else if (spot.status == 'available' && currentBookings.length >= 3) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'You have reached the maximum booking limit of 3 spots.',
-          ),
-        ),
-      );
-    }
-    // SCENARIO 4: Spot is taken by someone else
-    else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('This spot is already taken by another user.'),
-        ),
-      );
+    if (paymentSuccess == true) {
+       // 2. If Paid, Proceed to Book with Dynamic Cost
+       try {
+         await ParkingRepository().bookSpot(spotId, user!.uid, duration, calculatedCost: calculatedPrice);
+         
+         // Trigger Confirmation Notification
+         await NotificationService().showNotification(
+           id: DateTime.now().millisecondsSinceEpoch ~/ 1000, 
+           title: "Payment Successful! ✅", 
+           body: "Booking confirmed for Spot ${spotId.split('-').last}. Total: ₹${calculatedPrice.toInt()}"
+         );
+
+         if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text("Booking Successful!"), backgroundColor: Colors.green)
+            );
+         }
+       } catch (e) {
+         debugPrint(e.toString());
+         if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Booking Failed"), backgroundColor: Colors.red));
+         }
+       }
+    } else {
+       if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Payment Cancelled")));
+       }
     }
   }
 
-  // Function to show the BOOKING confirmation dialog
-  void _showBookDialog(BuildContext context, ParkingSpot spot, String userId) {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('Book Spot ${spot.id}?'),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              child: const Text('Confirm'),
-              onPressed: () async {
-                WriteBatch batch = FirebaseFirestore.instance.batch();
-
-                // Update spot
-                DocumentReference spotRef = FirebaseFirestore.instance
-                    .collection('parkingSpots')
-                    .doc(spot.id);
-                batch.update(spotRef, {
-                  'status': 'booked',
-                  'bookedBy': userId,
-                  'bookingTimestamp':
-                      FieldValue.serverTimestamp(), // Add timestamp for timer
-                });
-
-                // Add spot to user's booking array
-                DocumentReference userRef = FirebaseFirestore.instance
-                    .collection('users')
-                    .doc(userId);
-                batch.update(userRef, {
-                  'currentBookings': FieldValue.arrayUnion([
-                    spot.id,
-                  ]), // Use arrayUnion
-                });
-
-                await batch.commit();
-                Navigator.of(context).pop();
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  // Function to show the CANCELLATION confirmation dialog
-  void _showCancelDialog(
-    BuildContext context,
-    ParkingSpot spot,
-    String userId,
-  ) {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('Cancel Booking for ${spot.id}?'),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Close'),
-            ),
-            TextButton(
-              style: TextButton.styleFrom(foregroundColor: Colors.red),
-              child: const Text('Confirm Cancellation'),
-              onPressed: () async {
-                WriteBatch batch = FirebaseFirestore.instance.batch();
-
-                // Update spot
-                DocumentReference spotRef = FirebaseFirestore.instance
-                    .collection('parkingSpots')
-                    .doc(spot.id);
-                batch.update(spotRef, {
-                  'status': 'available',
-                  'bookedBy': null,
-                  'bookingTimestamp': null, // Clear timestamp
-                });
-
-                // Remove spot from user's booking array
-                DocumentReference userRef = FirebaseFirestore.instance
-                    .collection('users')
-                    .doc(userId);
-                batch.update(userRef, {
-                  'currentBookings': FieldValue.arrayRemove([
-                    spot.id,
-                  ]), // Use arrayRemove
-                });
-
-                await batch.commit();
-                Navigator.of(context).pop();
-              },
-            ),
-          ],
-        );
-      },
-    );
+  Future<void> _releaseSpot(String spotId) async {
+      final user = AuthService().currentUser;
+      try {
+        await ParkingRepository().releaseSpot(spotId, user!.uid);
+      } catch (e) {
+        debugPrint(e.toString());
+      }
   }
 }
